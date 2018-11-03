@@ -5,10 +5,10 @@
 #include <ESP8266mDNS.h> // https://github.com/esp8266/Arduino/tree/master/libraries/ESP8266mDNS
 #include <ESP8266WiFi.h> // https://github.com/esp8266/Arduino/tree/master/libraries/ESP8266WiFi
 
-const char* version="rangeWifiHttp-noip-yield";
+const char* version="rangeWifiHttp-noip-yield 2018-10-28";
 
 #include <SPI.h> // https://github.com/esp8266/Arduino/tree/master/libraries/SPI
-//#define HOME
+#define HOME
 // Enables debug print outs
 #define DEBUG 1
 // Set to 1 to disable reset logic from NodeMCU (ESP8266 board)
@@ -18,6 +18,7 @@ const char* version="rangeWifiHttp-noip-yield";
 //IPAddress ip(192, 168, 0, 101);
 //IPAddress gateway(192, 168, 0, 1);
 //IPAddress netmask(255, 255, 255, 0);
+
 //
 // WiFi SSID / password
 ////
@@ -76,6 +77,22 @@ ESP8266WebServer server(80);
 // Root route - http://<address>/
 void handleRoot() {
   server.send(200, "text/plain", "hello from esp8266!");
+}
+
+String getStatus() {
+  switch (slaveState) {
+    case READY_STATE:
+      return "ready";
+      break; 
+    case RUNNING_STATE:
+      return "running";
+      break; 
+    case RUN_COMPLETE_STATE:
+      return "complete";
+      break; 
+    default: 
+      return "unknown";
+  }
 }
 
 // Status route - http://<address>/status
@@ -159,13 +176,11 @@ void handleReset() {
 void handleGetHitData() {
 //  Serial.println(String("getHitData: ") + hitData);
   webHitCount++;
-  if (hitData.length() == 0) {
-    // don't get hit data, just send what is stored in the 8266
-//    sendCommandWithoutData(HITDATA, "get hit data");
-    server.send(200, "application/json", "{\"data\":\"\"}");
-    }
-  else {
-    String json = "{\"data\":[\"";
+  String json = "{\"status\": \"";
+  json += getStatus();
+  json += "\", \"data\":[";
+  if (hitData.length() > 0) {
+    json += "\"";
     for (int i = 0; i < hitData.length(); i++) {
       if (hitData[i] == '\n') {
         json += "\",\"";
@@ -174,11 +189,14 @@ void handleGetHitData() {
         json += hitData[i];     
       }
     }
-    json += String("\"]}");
-    hitData = "";
-//    Serial.println(json);
-    server.send(200, "application/json", json);
+    json += "\"";
   }
+  json += String("]}");
+  if (hitData.length() > 0) Serial.println(json);
+  hitData = "";
+  
+  server.send(200, "application/json", json);
+ 
 }
 
 // Default route for all other routes
