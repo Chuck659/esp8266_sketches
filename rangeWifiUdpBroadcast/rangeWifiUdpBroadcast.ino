@@ -4,12 +4,13 @@
 #include <ESP8266WebServer.h> // https://github.com/esp8266/Arduino/blob/master/libraries/ESP8266WebServer
 #include <ESP8266mDNS.h> // https://github.com/esp8266/Arduino/tree/master/libraries/ESP8266mDNS
 #include <ESP8266WiFi.h> // https://github.com/esp8266/Arduino/tree/master/libraries/ESP8266WiFi
+#include <EEPROM.h>
 #include <WifiUdp.h>
 
-const char* version="esp8266-vers-0.1 2018-10-28";
+const char* version="2018-11-15 - added setting ID";
 
 #include <SPI.h> // https://github.com/esp8266/Arduino/tree/master/libraries/SPI
-//#define HOME
+#define HOME
 // Enables debug print outs
 #define DEBUG 1
 // Set to 1 to disable reset logic from NodeMCU (ESP8266 board)
@@ -20,21 +21,17 @@ const char* version="esp8266-vers-0.1 2018-10-28";
 //IPAddress gateway(192, 168, 0, 1);
 //IPAddress netmask(255, 255, 255, 0);
 
-WiFiUDP Udp;
-unsigned int localUdpPort = 4210;
-char incomingPacket[255];  // buffer for incoming packets
-
 //
 // WiFi SSID / password
-////
+//
 #ifdef HOME
 const char *ssid = "ATTjAWscI2";
 const char *password = "csx#v=e%uq3t";
-IPAddress bcast(192, 168, 1, 255);
+IPAddress peer(192,168,1,255);
 #else
 const char *ssid = "TXTdev";
 const char *password = "Shoot999";
-IPAddress bcast(192, 168, 0, 255);
+IPAddress peer(192,168,0,255);
 #endif
 
 // Commands between NodeMCU and Arduino SPI slave
@@ -67,6 +64,7 @@ unsigned long serialPollLast = millis();
 #define RUNNING_STATE 2
 #define RUN_COMPLETE_STATE 3
 unsigned char slaveState = 0;
+unsigned char targetId = 0;
 
 // Status counters - used to debug connection status
 int pollCount = 0;
@@ -78,6 +76,10 @@ String hitData;
 
 // Create the Web Server listening on port 80 (http)
 ESP8266WebServer server(80);
+WiFiUDP Udp;
+unsigned int localUdpPort = 4210;
+char incomingPacket[80];
+
 
 // HTTP route handlers (see setup for mapping from URL to function
 //
@@ -185,6 +187,8 @@ void handleGetHitData() {
   webHitCount++;
   String json = "{\"status\": \"";
   json += getStatus();
+  json += "\", \"id\":\"";
+  json += targetId;
   json += "\", \"data\":[";
   if (hitData.length() > 0) {
     json += "\"";
@@ -213,12 +217,24 @@ void handleNotFound() {
 
 void setup()
 {
+
+  EEPROM.begin(512);
+  targetId = EEPROM.read(0);
+  if (targetId > 10) {
+    targetId = 0;
+    EEPROM.write(0, targetId);
+    EEPROM.commit();
+  }
+  
   Serial.begin(115200);
   delay(10);
 
   Serial.println();
   Serial.print("Version: ");
   Serial.println(version);
+
+  Serial.print("TargetId: ");
+  Serial.println(targetId == 0 ? String("Not Set") : String(targetId));
 
   // Initialize SPI  
   SPI.begin();
@@ -229,12 +245,9 @@ void setup()
   // Wait for configured delay to allow arduino to reset
   delay(resetDelay);
 
-
   // Connect to WiFi network
   Serial.println();
   Serial.println();
-  Serial.print("MAC: ");
-  Serial.println(WiFi.macAddress());
   Serial.println();
   Serial.print("Connecting to ");
   Serial.println(ssid);
@@ -313,6 +326,7 @@ void setup()
   Serial.println("");
 
   Udp.begin(localUdpPort);
+
   Serial.println("Setup complete");
 }
 
@@ -323,9 +337,10 @@ void getJobMenu() {
  Serial.println("0. display menu");
  Serial.println("1. get local status");
  Serial.println("2. run exercise");
- Serial.println("3. send udp packet");
- Serial.println("4. function 1");
- Serial.println("5. function 2");
+ Serial.println("3. get hit data");
+ Serial.println("4. set id");
+ Serial.println("5. function 1");
+ Serial.println("6. function 2");
  Serial.println("7. function 3");
  Serial.println("8. function 4");
  Serial.println("9. function 5");
@@ -365,31 +380,42 @@ void getJob(){
         sendCommandWithoutData(RUNCMD, "run"); 
       break;
       case 3:
-        sendUdpPacket();
+        sendCommandWithoutData(HITDATA, "get hit data");
         break;
       case 4:
-        sendCommandWithoutData(F1CMD, "function 1");
+        setTargetId();
         break;
       case 5:
-        sendCommandWithoutData(F2CMD, "function 2");
+        sendCommandWithoutData(F1CMD, "function 1");
         break;
       case 6:
-        sendCommandWithoutData(F3CMD, "function 3");
+        sendCommandWithoutData(F2CMD, "function 2");
         break;
       case 7:
-        sendCommandWithoutData(F4CMD, "function 4");
+        sendCommandWithoutData(F3CMD, "function 3");
         break;
       case 8:
-        sendCommandWithoutData(F5CMD, "function 5");
+        sendCommandWithoutData(F4CMD, "function 4");
         break;
       case 9:
-        sendCommandWithoutData(F6CMD, "function 6");
+        sendCommandWithoutData(F5CMD, "function 5");
         break;
       case 10:
-        sendCommandWithoutData(F7CMD, "function 7");
+        sendCommandWithoutData(F6CMD, "function 6");
         break;
       case 11:
+        sendCommandWithoutData(F7CMD, "function 7");
+        break;
+      case 12:
         resetSlave();
+        break;
+      case 13:
+        {
+          String test = "test";
+          Udp.beginPacket(peer, localUdpPort);
+          Udp.write(test.c_str(), test.length());
+          Udp.endPacket();
+        }
         break;
       case 99:
         done = true;
@@ -404,9 +430,39 @@ void loop()
   getJob();
 }
 
+void setTargetId() {
+  unsigned char input;
+  Serial.println(String("Target ID: ") + String(targetId));
+
+  Serial.println("Enter new target ID:");
+  while (!Serial.available()){
+    // Poll interfaces while waiting for user input
+    server.handleClient();
+    handleSerial();
+  }
+  delay(50);
+  while(Serial.available())
+  {
+    input = Serial.parseInt();
+    if (Serial.read() != '\n') { Serial.println("going to "+String(input)); }
+  }
+      Serial.println(String("input: ") + String(input));
+
+  if (input > 0 && input < 11) {
+    targetId = input;
+    EEPROM.write(0, targetId);
+    EEPROM.commit();
+    Serial.println(String("Target ID: ") + String(targetId));
+  }
+}
+
 // Dump some local data for debugging
 void getLocalStatus() {
   Serial.println("===================================================");
+  Serial.println(String("Version: ") + String(version));
+  Serial.println(String("Target ID: ") + String(targetId));
+  Serial.println(String("MAC: ") + WiFi.macAddress());
+  Serial.println(String("IP: ") + WiFi.localIP().toString());
   Serial.println(String("Poll count is ") + String(pollCount));
   Serial.println(String("Peer status is ") + String(slaveState));
   Serial.println(String("Web counts are ") + String(webCount) + String(" ") + String(webStatusCount) + " " + String(webHitCount));
@@ -432,30 +488,6 @@ void sendCommandWithoutData(unsigned char cmd, String cmdName) {
   Serial.println(response);
   
   handleCommand(recvCommand, response);
-}
-
-void handleUdp() {
-  int packetSize = Udp.parsePacket();
-  if (packetSize)
-  {
-    // receive incoming UDP packets
-    Serial.printf("Received %d bytes from %s, port %d\n", packetSize, Udp.remoteIP().toString().c_str(), Udp.remotePort());
-    int len = Udp.read(incomingPacket, 255);
-    if (len > 0)
-    {
-      incomingPacket[len] = 0;
-      hitData += String(incomingPacket) + "\n";
-    }
-    
-    Serial.printf("UDP packet contents: %s\n", incomingPacket);
-  }
-}
-
-void sendUdpPacket() {
-  Udp.beginPacket(bcast, localUdpPort); // subnet Broadcast IP and port
-  String msg = "hello from master";
-  Udp.write(msg.c_str(), msg.length());
-  Udp.endPacket();
 }
 
 // Poll the serial port if serialPollRate time has passed
@@ -493,10 +525,32 @@ void handleCommand(unsigned char command, String& data) {
     break;
     case HITDATA:
     {
-      hitData += data + "\n";
-      Serial.println(String("Hit Data Received:") + data);
+      if (data[0] == 'X') {
+        Serial.println("Hit!");
+        char packet[2] = {'X', targetId + '0'};
+        Udp.beginPacket(peer, localUdpPort);
+        Udp.write(packet, 2);
+        Udp.endPacket();
+      } else {
+        hitData += data + "\n";
+        Serial.println(String("Hit Data Received:") + data);
+      }
     }
     break;
+  }
+}
+
+void handleUdp() {
+  int packetSize = Udp.parsePacket();
+  if (packetSize) {
+    // receive incoming UDP packets
+    Serial.printf("Received %d bytes from %s, port %d\n", packetSize, 
+      Udp.remoteIP().toString().c_str(), Udp.remotePort());
+    int len = Udp.read(incomingPacket, 80);
+    if (len > 0) {
+      incomingPacket[len] = 0;
+    }
+    hitData += String("Udp: ") + String(incomingPacket) + "\n";
   }
 }
 
