@@ -34,6 +34,8 @@ const char *password = "Shoot999";
 IPAddress peer(192,168,0,255);
 #endif
 
+IPAddress multicast(224, 1, 2, 3);
+
 // Commands between NodeMCU and Arduino SPI slave
 #define RESETCMD 1
 #define PINGCMD 2
@@ -325,7 +327,8 @@ void setup()
   }
   Serial.println("");
 
-  Udp.begin(localUdpPort);
+//  Udp.begin(localUdpPort);
+  Udp.beginMulticast(WiFi.localIP(), multicast, localUdpPort);
 
   Serial.println("Setup complete");
 }
@@ -412,7 +415,8 @@ void getJob(){
       case 13:
         {
           String test = "test";
-          Udp.beginPacket(peer, localUdpPort);
+//          Udp.beginPacket(peer, localUdpPort);
+          Udp.beginPacketMulticast(WiFi.localIP(), multicast, localUdpPort);
           Udp.write(test.c_str(), test.length());
           Udp.endPacket();
         }
@@ -466,7 +470,12 @@ void getLocalStatus() {
   Serial.println(String("Poll count is ") + String(pollCount));
   Serial.println(String("Peer status is ") + String(slaveState));
   Serial.println(String("Web counts are ") + String(webCount) + String(" ") + String(webStatusCount) + " " + String(webHitCount));
-  Serial.println(String("Local hit data is ") + hitData);
+  if (hitData.length() > 0) {
+    Serial.println("Local hit data is ");
+    Serial.println("-------------------------\n");
+    Serial.println(hitData);
+    Serial.println("-------------------------\n");
+  }
   Serial.println("===================================================");
 }
 
