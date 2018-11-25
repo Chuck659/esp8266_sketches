@@ -7,7 +7,7 @@
 #include <EEPROM.h>
 #include <WifiUdp.h>
 
-const char* version="2018-11-15 - added setting ID";
+const char* version="18/11/24 - with UDP broadcast\n";
 
 #include <SPI.h> // https://github.com/esp8266/Arduino/tree/master/libraries/SPI
 #define HOME
@@ -21,20 +21,23 @@ const char* version="2018-11-15 - added setting ID";
 //IPAddress gateway(192, 168, 0, 1);
 //IPAddress netmask(255, 255, 255, 0);
 
+uint32_t peers[10] = {0,0,0,0,0,0,0,0,0,0};
+unsigned long lastBroadcast = 0;
+
 //
 // WiFi SSID / password
 //
 #ifdef HOME
 const char *ssid = "ATTjAWscI2";
 const char *password = "csx#v=e%uq3t";
-IPAddress peer(192,168,1,255);
+IPAddress bcast(192,168,1,255);
 #else
 const char *ssid = "TXTdev";
 const char *password = "Shoot999";
-IPAddress peer(192,168,0,255);
+IPAddress bcast(192,168,0,255);
 #endif
 
-IPAddress multicast(224, 1, 2, 3);
+IPAddress multicast(224, 0, 0, 224);
 
 // Commands between NodeMCU and Arduino SPI slave
 #define RESETCMD 1
@@ -50,6 +53,7 @@ IPAddress multicast(224, 1, 2, 3);
 #define F5CMD 26
 #define F6CMD 27
 #define F7CMD 28
+#define HITBASE 29
 #define ACK 0x40
 
 // Wait this delay (msec) after resetting arduino
@@ -80,8 +84,7 @@ String hitData;
 ESP8266WebServer server(80);
 WiFiUDP Udp;
 unsigned int localUdpPort = 4210;
-char incomingPacket[80];
-
+char incomingPacket[81];
 
 // HTTP route handlers (see setup for mapping from URL to function
 //
@@ -235,8 +238,9 @@ void setup()
   Serial.print("Version: ");
   Serial.println(version);
 
-  Serial.print("TargetId: ");
-  Serial.println(targetId == 0 ? String("Not Set") : String(targetId));
+  hitData += version;
+  hitData += "TargetId: ";
+  hitData += (targetId == 0 ? String("Not Set") : String(targetId)) + '\n';
 
   // Initialize SPI  
   SPI.begin();
@@ -245,7 +249,7 @@ void setup()
 //  resetSlave();
 
   // Wait for configured delay to allow arduino to reset
-  delay(resetDelay);
+//  delay(resetDelay);
 
   // Connect to WiFi network
   Serial.println();
@@ -309,7 +313,7 @@ void setup()
   {
     SPI.transfer(testString[i]);
   }
-  delay(100);
+  delay(10);
   yield();
   unsigned char cmd = SPI.transfer(0xFF);
   while (cmd == 0xff) {
@@ -327,9 +331,12 @@ void setup()
   }
   Serial.println("");
 
-//  Udp.begin(localUdpPort);
-  Udp.beginMulticast(WiFi.localIP(), multicast, localUdpPort);
-
+  if (!Udp.begin(localUdpPort)) {
+//  if (!Udp.beginMulticast(WiFi.localIP(), multicast, localUdpPort)) {
+    hitData += "Failed to start Udp\n";
+  }
+  
+  hitData += "Setup complete\n";
   Serial.println("Setup complete");
 }
 
@@ -364,8 +371,9 @@ void getJob(){
       server.handleClient();
       handleSerial();
       handleUdp();
+      broadcastID();
     }
-    delay(50);
+    delay(10);
     while(Serial.available())
     {
       jobNumber = Serial.parseInt();
@@ -414,11 +422,10 @@ void getJob(){
         break;
       case 13:
         {
-          String test = "test";
+//          String test = "test";
 //          Udp.beginPacket(peer, localUdpPort);
-          Udp.beginPacketMulticast(WiFi.localIP(), multicast, localUdpPort);
-          Udp.write(test.c_str(), test.length());
-          Udp.endPacket();
+//          Udp.write(test.c_str(), test.length());
+//          Udp.endPacket();
         }
         break;
       case 99:
@@ -444,7 +451,7 @@ void setTargetId() {
     server.handleClient();
     handleSerial();
   }
-  delay(50);
+  delay(10);
   while(Serial.available())
   {
     input = Serial.parseInt();
@@ -474,7 +481,7 @@ void getLocalStatus() {
     Serial.println("Local hit data is ");
     Serial.println("-------------------------\n");
     Serial.println(hitData);
-    Serial.println("-------------------------\n");
+    Serial.println("-------------------------\n"); 
   }
   Serial.println("===================================================");
 }
@@ -484,13 +491,14 @@ void sendCommandWithoutData(unsigned char cmd, String cmdName) {
   
   SPI.transfer((char)cmd);
   debugMsgStr("sending command: ", cmdName, true);
+  debugMsgInt("sending command: ", cmd, true);
 
   delay(2);
   // No length
   SPI.transfer((char)0);
 
   yield();
-  delay(100);
+  delay(10);
   // Receive and process any response
   unsigned char recvCommand;
   String response = recvSerial(&recvCommand);
@@ -535,11 +543,9 @@ void handleCommand(unsigned char command, String& data) {
     case HITDATA:
     {
       if (data[0] == 'X') {
-        Serial.println("Hit!");
+        hitData += String("Hit!") + String("\n");
         char packet[2] = {'X', targetId + '0'};
-        Udp.beginPacket(peer, localUdpPort);
-        Udp.write(packet, 2);
-        Udp.endPacket();
+        broadcastMessage(packet, 2);
       } else {
         hitData += data + "\n";
         Serial.println(String("Hit Data Received:") + data);
@@ -551,15 +557,64 @@ void handleCommand(unsigned char command, String& data) {
 
 void handleUdp() {
   int packetSize = Udp.parsePacket();
-  if (packetSize) {
+  while (packetSize) {
     // receive incoming UDP packets
-    Serial.printf("Received %d bytes from %s, port %d\n", packetSize, 
-      Udp.remoteIP().toString().c_str(), Udp.remotePort());
+//    Serial.printf("Received %d bytes from %s, port %d\n", packetSize, 
+//      Udp.remoteIP().toString().c_str(), Udp.remotePort());
+
+    saveRemoteIP((uint32_t)Udp.remoteIP());
+      
     int len = Udp.read(incomingPacket, 80);
-    if (len > 0) {
+    if (len >0) {
       incomingPacket[len] = 0;
+    
+      if (len >= 2 && incomingPacket[0] == 'X') {
+        hitData += String("Udp: ") + String(incomingPacket) + "\n";
+        unsigned char hitCommand = (incomingPacket[1] - '0') + HITBASE;
+        sendCommandWithoutData(hitCommand, "neighborhit");
+      }
     }
-    hitData += String("Udp: ") + String(incomingPacket) + "\n";
+    packetSize = Udp.parsePacket();
+  }
+}
+
+void saveRemoteIP(uint32_t addr) {
+  for (int i = 0; i < 10; i++) {
+    if (peers[i] == 0) {
+      peers[i] = addr;
+      Serial.println("New remote detected");
+      break;
+    }
+    else if (peers[i] == addr) {
+      break;
+    }
+  }
+}
+
+void broadcastID() {
+  unsigned long now = millis();
+  if (now - lastBroadcast > 5000) {
+    lastBroadcast = now;
+    char packet[2] = {'I', targetId + '0'};
+    if (!Udp.beginPacket(bcast, localUdpPort)) {
+        Serial.println("Failed to begin packet");
+    }
+    else {
+     Udp.write(packet, 2);
+     Udp.endPacket();
+   }
+  }
+}
+
+void broadcastMessage(const char* msg, int len) {
+  for (int i = 0; i < 10; i++) {
+    if (peers[i] != 0) {
+      IPAddress p(peers[i]);
+      Serial.printf("%s, %d, %s\n", p.toString().c_str(), len, msg);
+      Udp.beginPacket(p, localUdpPort);
+      Udp.write(msg, len);
+      Udp.endPacket();
+    }
   }
 }
 
